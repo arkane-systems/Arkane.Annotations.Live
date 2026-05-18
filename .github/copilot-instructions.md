@@ -18,7 +18,7 @@ The source file `Arkane.Annotations.Live\Annotations.cs` was downloaded from the
 ## Project Decisions (summary)
 - Namespace: All public types live in Arkane.Annotations.Live (do not preserve JetBrains.Annotations). Type forwarding is a fallback if downstream compatibility issues arise.
 - File layout: Group subfolders under `Arkane.Annotations.Live\` (e.g., `Nullability\`, `Contracts\`); one attribute + supporting types per file; subfolders are non-namespace-providers (`RootNamespace = Arkane.Annotations.Live`). License text in `LICENSE.md`; per-file header is a short reference only.
-- Nullability: Use Metalama null guards for `[NotNull]`, `[CanBeNull]`, `[ItemNotNull]`, `[ItemCanBeNull]`. Consider an opt-out mechanism for consumers with full nullable reference type coverage.
+- Nullability: Use Metalama null guards for `[NotNull]`, `[CanBeNull]`, `[ItemNotNull]`, `[ItemCanBeNull]`. Two assembly-level attributes (`[AssumesNrtCallers]` and `[EnforceNullabilityForPreNrtCallers]`) control NRT interop behaviour (see Nullability section and Phase 4).
 - Annotation-only attributes: Keep IDE-only groups (ASP.NET MVC, Razor, XAML, SourceTemplates, legacy ASP.NET) as plain attributes in this project.
 - Tests: Use xUnit in the Arkane.Annotations.Live.Tests project to validate aspect behavior (both positive and negative cases).
 - Delivery: Package as a NuGet package; consumers must reference Metalama at least as a dependency.
@@ -44,7 +44,18 @@ The subfolders must **not** introduce extra namespace segments — all types sta
 
 Use **Metalama null guards** for `[NotNull]` / `[CanBeNull]` / `[ItemNotNull]` / `[ItemCanBeNull]`. The rationale: nullable reference types (NRT) only protect within a fully nullable-aware build; callers and callees compiled without NRT are still unsafe.
 
-Future option to consider: expose a way to opt out of null-guard injection per call site (or globally) for projects that can guarantee full NRT coverage throughout their dependency graph. Revisit when implementing the nullability attributes.
+#### Assembly-level NRT control attributes (Phase 2)
+
+Two mutually exclusive assembly-level attributes govern NRT interop behaviour. Both are defined in `Nullability\` and their mutual exclusivity is enforced by a `[BaseTypeRequired]`-style self-validation check at compile time.
+
+- **`[AssumesNrtCallers]`** — Applied to an assembly to declare that all consumers of that assembly are NRT-aware. Effect: `[NotNull]` on a non-nullable reference type emits a compile-time **warning** (`AAL02xx`: *"[NotNull] is redundant on a non-nullable type in an [AssumesNrtCallers] assembly; the NRT annotation already enforces non-nullability for aware callers."*). `[CanBeNull]` on a nullable type (`T?`) always emits this warning regardless of `[AssumesNrtCallers]` (it is unconditionally redundant). The Phase 4 nullability fabric does **not** run when this attribute is present.
+
+- **`[EnforceNullabilityForPreNrtCallers]`** — Applied to an assembly to activate the Phase 4 nullability fabric, which walks the public API surface and applies `[NotNull]`/`[CanBeNull]` aspects inferred from NRT annotations. Intended for libraries that enable NRT but whose consumers may not. Must not be combined with `[AssumesNrtCallers]`.
+
+#### Default behaviour (neither attribute present)
+
+- `[NotNull]` on a non-nullable reference type: **no warning** (defence-in-depth; the runtime guard catches callers who ignore or suppress the compiler).
+- `[CanBeNull]` on a nullable type (`T?`): **warning** (`AAL02xx`) — unconditionally redundant.
 
 ### Annotation-Only Attributes
 
@@ -240,7 +251,8 @@ Each group gets its own subfolder under `Arkane.Annotations.Live\`. Within each 
 4. **Obsolete/skip** — Already deprecated upstream; keep the `[Obsolete]` marker but add no aspect logic (e.g., `TerminatesProgram`).
 
 **Per-attribute notes:**
-- **`[NotNull]` / `[CanBeNull]` / `[ItemNotNull]` / `[ItemCanBeNull]`:** Full aspect — inject null guards. Consider an opt-out mechanism for fully NRT-aware consumers (design TBD when implementing).
+- **`[NotNull]` / `[CanBeNull]` / `[ItemNotNull]` / `[ItemCanBeNull]`:** Full aspect — inject null guards. See the Nullability architecture section for `[AssumesNrtCallers]` / `[EnforceNullabilityForPreNrtCallers]` and the redundancy warning rules.
+- **`[AssumesNrtCallers]`** and **`[EnforceNullabilityForPreNrtCallers]`:** New assembly-level attributes defined in `Nullability\` as part of Phase 2 (see Nullability section above).
 - **`[ValueRange]` / `[NonNegativeValue]`:** Full aspect — inject `ArgumentOutOfRangeException` guards on parameters; warn on impossible-range constants at call sites if feasible.
 - **`[MustDisposeResource]` / `[HandlesResourceDisposal]`:** Full or partial — compile-time checks via Metalama validators that ownership is handled.
 - **`[ContractAnnotation]`:** The FDT mini-language is complex. **Revisit in depth before implementing.** Likely partial at best; full FDT enforcement is probably out of scope. Annotate the decision in the Phase 2 plan.
@@ -264,6 +276,22 @@ Each group gets its own subfolder under `Arkane.Annotations.Live\`. Within each 
 
 ---
 
+### Phase 4 — Fabrics
+
+**Goal:** Add Metalama fabrics that automate annotation across whole assemblies, unlocking enforcement that is impossible at the individual declaration site.
+
+The detailed fabric designs live in `Phase4\PLAN.md`. The confirmed Phase 4 deliverables are:
+
+1. **Nullability fabric** (`[EnforceNullabilityForPreNrtCallers]`): Walk the public API surface of the consuming assembly and apply `[NotNull]`/`[CanBeNull]` aspects inferred from NRT annotations. Does not run if `[AssumesNrtCallers]` is present (the two attributes are mutually exclusive).
+2. **`[NotifyPropertyChangedInvocator]` auto-application fabric**: Find all types implementing `INotifyPropertyChanged` that have a method matching one of the five recognised signatures but lack the `[NotifyPropertyChangedInvocator]` annotation, and apply it automatically (or warn that it is missing).
+3. **CQRS cross-calling fabric**: Walk method bodies compilation-wide to detect `[CqrsCommand]` methods calling `[CqrsQuery]` methods (or vice versa) — the cross-role enforcement that is impossible from a declaration-site aspect alone.
+
+The following were considered and **deferred** beyond Phase 4 (better suited as user-defined fabrics in consuming projects than as library-provided ones):
+- `[Pure]` propagation across immutable types
+- `[MustDisposeResource]` factory-method auto-application
+
+---
+
 ## Metalama Conventions
 
 - Use `Metalama.Framework.Aspects` and `Metalama.Framework.Diagnostics` namespaces.
@@ -273,6 +301,18 @@ Each group gets its own subfolder under `Arkane.Annotations.Live\`. Within each 
 - Use `[CompileTime]` on helpers that must only run during compilation.
 - Never add runtime overhead beyond what the enforced contract strictly requires.
 - Do **not** add Metalama `using` directives to files that contain only annotation-only plain attributes.
+
+## Metalama.Patterns.Contracts Compatibility
+
+`Metalama.Patterns.Contracts` (same version family as `Metalama.Framework`) is a first-party Metalama library that provides ready-made contract aspects (`NotNullAttribute`, `NonNegativeAttribute`, `RangeAttribute`, etc.) and a shared violation infrastructure (`ContractTemplates`, `PostconditionViolationException`, `ContractOptions`).
+
+**Rules when implementing aspects in this project:**
+
+- **Reuse violation infrastructure**: Use `ContractTemplates` methods (e.g., `OnNotNullContractViolated`) from `Metalama.Patterns.Contracts` to generate violation code rather than writing custom `throw` statements. This ensures that users who customize `ContractTemplates` globally (a supported Metalama extensibility pattern) get consistent behavior from both our attributes and Metalama's own contracts.
+- **Match exception types**: Precondition violations (input parameters, property setters) throw `ArgumentNullException` or `ArgumentOutOfRangeException`; postcondition violations (return values) throw `PostconditionViolationException` — same as `Metalama.Patterns.Contracts`.
+- **Warn consistently**: Emit compile-time warnings using the same LAMA-prefixed diagnostic codes where a direct equivalent exists (e.g., LAMA5002 for `[NotNull]` on a nullable type). Where no direct code exists, define a new diagnostic code in the `AAL` prefix range.
+- **Document name conflicts explicitly**: Where `Metalama.Patterns.Contracts` defines an identically-named attribute (e.g., `NotNullAttribute`), add an XML doc note and README note that warns users of the ambiguity and describes the `using` alias pattern to resolve it.
+- **Add `Metalama.Patterns.Contracts` as a package reference** in `Arkane.Annotations.Live.csproj` when implementing the first aspect that uses its violation infrastructure (i.e., when implementing `[NotNull]`).
 
 ---
 
@@ -326,3 +366,33 @@ dotnet-coverage collect -f cobertura -o coverage.cobertura.xml dotnet test
 ```
 
 Metalama aspects are validated at compile time; build warnings/errors from Metalama count as test failures.
+
+---
+
+## Diagnostic Code Scheme
+
+All compile-time diagnostics use the prefix `AAL` followed by a four-digit code (`AALxxnn`),
+where `xx` identifies the subfolder and `nn` is the specific code within that range.
+The authoritative registry — including range assignments, individual codes, severities, and
+messages — is maintained in [`DIAGNOSTICS.md`](../DIAGNOSTICS.md) at the repository root.
+
+**Summary of range assignments:**
+
+| Range | Subfolder |
+|---|---|
+| `AAL01xx` | `Formatting\` |
+| `AAL02xx` | `Nullability\` |
+| `AAL03xx` | `ValueConstraints\` |
+| `AAL04xx` | `Contracts\` — `[ContractAnnotation]` |
+| `AAL05xx` | `Contracts\` — `[NotifyPropertyChangedInvocator]` |
+| `AAL06xx` | `CodeQuality\` |
+| `AAL07xx` | `MethodBehavior\` |
+| `AAL08xx` | `Assertions\` |
+| `AAL09xx` | `Strings\` |
+| `AAL10xx` | `SourceTemplates\` |
+| `AAL11xx` | `Cqrs\` |
+
+**Rules:**
+- Assign codes sequentially from `xx01` within each range; `xx00` is reserved/unused.
+- Record every new code in `DIAGNOSTICS.md` at the time of implementation.
+- Runtime violations use standard .NET exceptions, not `AAL` codes.
