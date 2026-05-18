@@ -1,6 +1,7 @@
 # MIT License
 
-Copyright (c) 2025 JetBrains http://www.jetbrains.com
+Copyright (c) 2025 JetBrains http://www.jetbrains.com  
+Portions copyright (c) 2026 Arkane Systems / Alistair J. R. Young — aspect modifications and additions
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
